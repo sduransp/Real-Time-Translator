@@ -1,68 +1,62 @@
-import whisper
-import pyaudio
+import datetime
+import logging
+import os
+import wave
+import threading
+import tempfile
 import numpy as np
-import time
+import sounddevice as sd
+from openai import OpenAI
+import whisper
+import warnings
 
-def real_time_translation():
-    model = whisper.load_model("base")
+# Suprimir la advertencia de FP16
+warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead")
 
-    # Configuración de PyAudio
-    CHUNK = 1024  # Tamaño del bloque
-    FORMAT = pyaudio.paInt16  # Formato de los datos
-    CHANNELS = 1  # Número de canales
-    RATE = 16000  # Tasa de muestreo
-    RECORD_SECONDS = 2  # Número de segundos a acumular antes de transcribir
-    SILENCE_THRESHOLD = 0.01  # Umbral de silencio
+class RealTimeTranscriber:
+    def __init__(self, model_name="base", sample_rate=16000):
+        self.sample_rate = sample_rate
+        self.model = whisper.load_model(model_name)
+        self.is_running = False
+        self.queue = np.ndarray([], dtype=np.float32)
+        self.mutex = threading.Lock()
+        self.chunk_size = 1024
+        self.temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        self.audio_interface = sd.InputStream(samplerate=self.sample_rate, channels=1, dtype="float32", callback=self.callback)
 
-    # Inicialización de PyAudio
-    p = pyaudio.PyAudio()
+    def callback(self, indata, frames, time, status):
+        with self.mutex:
+            self.queue = np.append(self.queue, indata.ravel())
+            if len(self.queue) >= self.chunk_size:
+                audio_chunk = self.queue[:self.chunk_size]
+                self.queue = self.queue[self.chunk_size:]
+                self.transcribe(audio_chunk)
 
-    stream = p.open(format=FORMAT,
-                    channels=CHANNELS,
-                    rate=RATE,
-                    input=True,
-                    frames_per_buffer=CHUNK)
+    def transcribe(self, audio_chunk):
+        pcm_data = (audio_chunk * 32767).astype(np.int16).tobytes()
+        with wave.open(self.temp_file.name, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(self.sample_rate)
+            wf.writeframes(pcm_data)
+        result = self.model.transcribe(self.temp_file.name, language='es')
+        print(result['text'])
 
-    print("Recording...")
+    def start(self):
+        self.is_running = True
+        with self.audio_interface as stream:
+            while self.is_running:
+                sd.sleep(1000)
 
+    def stop(self):
+        self.is_running = False
+        self.audio_interface.abort()
+
+if __name__ == "__main__":
+    transcriber = RealTimeTranscriber()
     try:
-        while True:
-            print("Collecting audio...")
-            frames = []
-
-            for _ in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
-                data = stream.read(CHUNK, exception_on_overflow=False)
-                audio_chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-                frames.append(audio_chunk)
-
-            # Unir los fragmentos de audio acumulados
-            audio = np.concatenate(frames)
-
-            # Detectar y eliminar silencio
-            if np.max(np.abs(audio)) > SILENCE_THRESHOLD:
-                # Procesa el audio si supera el umbral de silencio
-                audio = whisper.pad_or_trim(audio)
-
-                # Crea el espectrograma log-Mel y muévelo al mismo dispositivo que el modelo
-                mel = whisper.log_mel_spectrogram(audio).to(model.device)
-
-                # Decodifica el audio asumiendo que el idioma es español
-                options = whisper.DecodingOptions(language="es")
-                result = whisper.decode(model, mel, options)
-
-                # Imprime el texto reconocido
-                print(result.text)
-            else:
-                print("Silence detected, skipping...")
-
-            # Pausa breve para evitar solapamiento
-            time.sleep(0.1)
-
+        transcriber.start()
     except KeyboardInterrupt:
-        # Finaliza la grabación
-        print("Stopping...")
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-
-real_time_translation()
+        transcriber.stop()
+        os.unlink(transcriber.temp_file.name)
+        print("Transcription stopped.")
