@@ -1,209 +1,145 @@
-import datetime
-import logging
+#! python3.7
+
+import argparse
 import os
-import wave
-import threading
-import tempfile
 import numpy as np
-import sounddevice as sd
+import speech_recognition as sr
 import whisper
-import warnings
-import queue
-import sys
+import torch
 
-# Suppress the FP16 warning
-warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead")
+from datetime import datetime, timedelta
+from queue import Queue
+from time import sleep
+from sys import platform
 
-class RealTimeTranscriber:
+from translation import text_translation
+
+
+def main(model="medium", non_english=True, output_language="English", energy_threshold=1000, record_timeout=3, phrase_timeout=3, default_microphone='pulse'):
     """
-    A class to handle real-time audio transcription using Whisper.
-
-    Attributes:
-    -----------
-    sample_rate : int
-        The sample rate for the audio input.
-    model : whisper.Model
-        The Whisper model used for transcription.
-    is_running : bool
-        Flag to control the running state of the transcription.
-    queue : queue.Queue
-        Queue to hold audio chunks for processing.
-    audio_queue : np.ndarray
-        Array to accumulate audio data before processing.
-    mutex : threading.Lock
-        Mutex for thread-safe operations on audio_queue.
-    chunk_size : int
-        Size of each audio chunk (in samples).
-    silence_threshold : float
-        Threshold to detect silence based on audio energy.
-    silence_duration : int
-        Duration to consider as silence (in seconds).
-    silence_buffer : int
-        Number of samples representing the silence duration.
-    silence_counter : int
-        Counter to keep track of silence duration.
-    recording_active : bool
-        Flag to indicate if recording is currently active.
-    audio_interface : sd.InputStream
-        Audio input stream interface.
-    transcription_thread : threading.Thread
-        Thread to handle transcription in the background.
-    """
-
-    def __init__(self, model_name="base", sample_rate=16000, silence_threshold=0.005, silence_duration=1):
-        """
-        Initialize the RealTimeTranscriber with the specified model and parameters.
+        Performs real-time speech recognition using the Whisper model.
 
         Parameters:
-        -----------
-        model_name : str
-            Name of the Whisper model to load.
-        sample_rate : int
-            Sample rate for the audio input.
-        silence_threshold : float
-            Threshold to detect silence based on audio energy.
-        silence_duration : int
-            Duration to consider as silence (in seconds).
-        """
-        self.sample_rate = sample_rate
-        self.model = whisper.load_model(model_name)
-        self.is_running = False
-        self.queue = queue.Queue()
-        self.audio_queue = np.ndarray([], dtype=np.float32)
-        self.mutex = threading.Lock()
-        self.chunk_size = self.sample_rate  # 1 second chunks
-        self.silence_threshold = silence_threshold
-        self.silence_duration = silence_duration
-        self.silence_buffer = int(self.sample_rate * self.silence_duration)
-        self.silence_counter = 0
-        self.recording_active = False
-        self.audio_interface = sd.InputStream(samplerate=self.sample_rate, channels=1, dtype="float32", callback=self.callback)
-
-        # Start the transcription thread
-        self.transcription_thread = threading.Thread(target=self.process_queue)
-        self.transcription_thread.start()
-
-    def callback(self, indata, frames, time, status):
-        """
-        Callback function to handle incoming audio data.
-
-        Parameters:
-        -----------
-        indata : np.ndarray
-            The incoming audio data.
-        frames : int
-            Number of frames in the audio data.
-        time : CData
-            Timing information.
-        status : CallbackFlags
-            Status flags.
-        """
-        with self.mutex:
-            audio_chunk = indata.ravel()
-            self.queue.put(audio_chunk)
-            # print("Audio chunk added to queue")  # Debug message
-            sys.stdout.flush()
-
-    def is_silent(self, audio_chunk):
-        """
-        Check if the given audio chunk is silent based on the energy threshold.
-
-        Parameters:
-        -----------
-        audio_chunk : np.ndarray
-            The audio chunk to check.
+        - model (str): Whisper model to use (tiny, base, small, medium, large). Default is "medium".
+        - non_english (bool): If set, does not use the English model. Default is False.
+        - energy_threshold (int): Energy level for the microphone to detect. Default is 1000.
+        - record_timeout (float): How real-time the recording is in seconds. Default is 2.
+        - phrase_timeout (float): How much empty space between recordings before considering it a new line in the transcription. Default is 3.
+        - default_microphone (str): Default microphone name for SpeechRecognition on Linux. Default is 'pulse'.
 
         Returns:
-        --------
-        bool
-            True if the audio chunk is silent, False otherwise.
-        """
-        energy = np.mean(np.abs(audio_chunk))
-        # print(f"Energy: {energy}")  # Debug message
-        return energy < self.silence_threshold
+        None
+    """
+    # The last time a recording was retrieved from the queue.
+    phrase_time = None
+    # Thread safe Queue for passing data from the threaded recording callback.
+    data_queue = Queue()
+    # We use SpeechRecognizer to record our audio because it has a nice feature where it can detect when speech ends.
+    recorder = sr.Recognizer()
+    recorder.energy_threshold = energy_threshold
+    # Definitely do this, dynamic energy compensation lowers the energy threshold dramatically to a point where the SpeechRecognizer never stops recording.
+    recorder.dynamic_energy_threshold = False
 
-    def process_queue(self):
-        """
-        Process the audio chunks from the queue and handle recording state transitions.
-        """
-        while True:
-            audio_chunk = self.queue.get()
-            if audio_chunk is None:
-                break
+    # Important for linux users.
+    # Prevents permanent application hang and crash by using the wrong Microphone
+    if 'linux' in platform:
+        mic_name = default_microphone
+        if not mic_name or mic_name == 'list':
+            print("Available microphone devices are: ")
+            for index, name in enumerate(sr.Microphone.list_microphone_names()):
+                print(f"Microphone with name \"{name}\" found")
+            return
+        else:
+            for index, name in enumerate(sr.Microphone.list_microphone_names()):
+                if mic_name in name:
+                    source = sr.Microphone(sample_rate=16000, device_index=index)
+                    break
+    else:
+        source = sr.Microphone(sample_rate=16000)
 
-            if self.is_silent(audio_chunk):
-                if self.recording_active:
-                    self.silence_counter += len(audio_chunk)
-                    if self.silence_counter >= self.silence_buffer:
-                        self.recording_active = False
-                        self.silence_counter = 0
-                        if self.audio_queue.size > 0:
-                            self.transcribe(np.concatenate([self.audio_queue]))
-                        self.audio_queue = np.ndarray([], dtype=np.float32)
-                # If not recording, do nothing
-            else:
-                if not self.recording_active:
-                    self.audio_queue = np.ndarray([], dtype=np.float32)
-                    self.recording_active = True
-                self.silence_counter = 0
-                self.audio_queue = np.append(self.audio_queue, audio_chunk)
+    # Load / Download model
+    
+    if model != "large" and not non_english:
+        model = model + ".en"
+    audio_model = whisper.load_model(model)
 
-    def transcribe(self, audio_chunk):
-        """
-        Transcribe the given audio chunk using the Whisper model.
+    record_timeout = record_timeout
+    phrase_timeout = phrase_timeout
 
-        Parameters:
-        -----------
-        audio_chunk : np.ndarray
-            The audio chunk to transcribe.
+    transcription = ['']
+
+    with source:
+        recorder.adjust_for_ambient_noise(source)
+
+    def record_callback(_, audio:sr.AudioData) -> None:
         """
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
-            pcm_data = (audio_chunk * 32767).astype(np.int16).tobytes()
-            with wave.open(temp_file.name, 'wb') as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(self.sample_rate)
-                wf.writeframes(pcm_data)
-            temp_filename = temp_file.name
+        Threaded callback function to receive audio data when recordings finish.
+        audio: An AudioData containing the recorded bytes.
+        """
+        # Grab the raw bytes and push it into the thread safe queue.
+        data = audio.get_raw_data()
+        data_queue.put(data)
+
+    # Create a background thread that will pass us raw audio bytes.
+    # We could do this manually but SpeechRecognizer provides a nice helper.
+    recorder.listen_in_background(source, record_callback, phrase_time_limit=record_timeout)
+
+    # Cue the user that we're ready to go.
+    print("Model loaded.\n")
+
+    while True:
         try:
-            print(f"Transcribing audio chunk from {temp_filename}")  # Debug message
-            sys.stdout.flush()
-            result = self.model.transcribe(temp_filename, language='es')
-            print(f"Transcription result: {result['text']}")  # Debug message
-            sys.stdout.flush()  # Force flush the output buffer
-        except Exception as e:
-            print(f"Error during transcription: {e}")
-            sys.stdout.flush()
-        finally:
-            os.unlink(temp_filename)
+            now = datetime.utcnow()
+            # Pull raw recorded audio from the queue.
+            if not data_queue.empty():
+                phrase_complete = False
+                # If enough time has passed between recordings, consider the phrase complete.
+                # Clear the current working audio buffer to start over with the new data.
+                if phrase_time and now - phrase_time > timedelta(seconds=phrase_timeout):
+                    phrase_complete = True
+                # This is the last time we received new audio data from the queue.
+                phrase_time = now
+                
+                # Combine audio data from queue
+                audio_data = b''.join(data_queue.queue)
+                data_queue.queue.clear()
+                
+                # Convert in-ram buffer to something the model can use directly without needing a temp file.
+                # Convert data from 16 bit wide integers to floating point with a width of 32 bits.
+                # Clamp the audio stream frequency to a PCM wavelength compatible default of 32768hz max.
+                audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
 
-    def start(self):
-        """
-        Start the audio stream and transcription process.
-        """
-        self.is_running = True
-        with self.audio_interface as stream:
-            print("Starting audio stream")  # Debug message
-            sys.stdout.flush()
-            while self.is_running:
-                sd.sleep(1000)
+                # Read the transcription.
+                result = audio_model.transcribe(audio_np, fp16=torch.cuda.is_available())
+                text = result['text'].strip()
 
-    def stop(self):
-        """
-        Stop the audio stream and transcription process.
-        """
-        self.is_running = False
-        self.queue.put(None)  # Send a signal to the transcription thread to stop
-        self.transcription_thread.join()
-        self.audio_interface.abort()
-        print("Transcription stopped.")  # Debug message
-        sys.stdout.flush()  # Force flush the output buffer
+                # If we detected a pause between recordings, add a new item to our transcription.
+                # Otherwise edit the existing one.
+                if phrase_complete:
+                    # translating
+                    text = text_translation(text=text, output_language=output_language)
+                    # appending
+                    transcription.append(text)
+                    # text to speech
+                else:
+                    transcription[-1] = text
+
+                # Clear the console to reprint the updated transcription.
+                os.system('cls' if os.name=='nt' else 'clear')
+                for line in transcription:
+                    print(line)
+                # Flush stdout.
+                print('', end='', flush=True)
+            else:
+                # Infinite loops are bad for processors, must sleep.
+                sleep(0.25)
+        except KeyboardInterrupt:
+            break
+
+    print("\n\nTranscription:")
+    for line in transcription:
+        print(line)
+
 
 if __name__ == "__main__":
-    transcriber = RealTimeTranscriber()
-    try:
-        transcriber.start()
-    except KeyboardInterrupt:
-        transcriber.stop()
-        print("Transcription stopped by KeyboardInterrupt.")  # Debug message
-        sys.stdout.flush()  # Force flush the output buffer
+    main()
