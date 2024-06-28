@@ -19,20 +19,20 @@ from translation import text_translation, languages_dict
 
 class RealTimeTranslator:
     """
-        A class to perform real-time speech recognition, translation, and text-to-speech synthesis.
+    A class to perform real-time speech recognition, translation, and text-to-speech synthesis.
     """
-    def __init__(self, model="tiny", non_english=True, output_language="English", energy_threshold=1000, record_timeout=3, phrase_timeout=3, default_microphone='pulse'):
+    def __init__(self, model="tiny", non_english=True, output_language="German", energy_threshold=1000, record_timeout=3, phrase_timeout=3, default_microphone='pulse'):
         """
-            Initialize the RealTimeTranslator with the given parameters.
+        Initialize the RealTimeTranslator with the given parameters.
 
-            Parameters:
-            model (str): Whisper model to use (tiny, base, small, medium, large). Default is "tiny".
-            non_english (bool): If set, does not use the English model. Default is True.
-            output_language (str): The language for the output translation. Default is "English".
-            energy_threshold (int): Energy level for the microphone to detect. Default is 1000.
-            record_timeout (float): How real-time the recording is in seconds. Default is 3.
-            phrase_timeout (float): How much empty space between recordings before considering it a new line in the transcription. Default is 3.
-            default_microphone (str): Default microphone name for SpeechRecognition on Linux. Default is 'pulse'.
+        Parameters:
+        model (str): Whisper model to use (tiny, base, small, medium, large). Default is "tiny".
+        non_english (bool): If set, does not use the English model. Default is True.
+        output_language (str): The language for the output translation. Default is "English".
+        energy_threshold (int): Energy level for the microphone to detect. Default is 1000.
+        record_timeout (float): How real-time the recording is in seconds. Default is 3.
+        phrase_timeout (float): How much empty space between recordings before considering it a new line in the transcription. Default is 3.
+        default_microphone (str): Default microphone name for SpeechRecognition on Linux. Default is 'pulse'.
         """
         # Instantiating variables
         self.model_name = model
@@ -46,7 +46,12 @@ class RealTimeTranslator:
         self.phrase_time = None
         self.data_queue = Queue()
         self.transcription = ['']
-        self.tts = TTS(model_name="tts_models/multilingual/multi-dataset/your_tts", progress_bar=False)
+
+        # Initialize TTS model based on output language
+        if self.output_language == "German":
+            self.tts = TTS(model_name="tts_models/de/thorsten/tacotron2-DDC", progress_bar=False)
+        else:  # Default to English or any other language
+            self.tts = TTS(model_name="tts_models/multilingual/multi-dataset/your_tts", progress_bar=False)
 
         self.recorder = sr.Recognizer()
         self.recorder.energy_threshold = energy_threshold
@@ -58,7 +63,7 @@ class RealTimeTranslator:
 
     def setup_microphone(self):
         """
-            Setup the microphone for audio recording.
+        Setup the microphone for audio recording.
         """
         if 'linux' in platform:
             mic_name = self.default_microphone
@@ -77,7 +82,7 @@ class RealTimeTranslator:
 
     def load_audio_model(self):
         """
-            Load the Whisper audio model.
+        Load the Whisper audio model.
         """
         if self.model_name != "large" and not self.non_english:
             self.model_name = self.model_name + ".en"
@@ -85,9 +90,9 @@ class RealTimeTranslator:
 
     def record_callback(self, _, audio: sr.AudioData) -> None:
         """"
-            Callback function to receive audio data when recordings finish.
+        Callback function to receive audio data when recordings finish.
 
-            Parameters:
+        Parameters:
             audio (sr.AudioData): An AudioData containing the recorded bytes.
         """
         data = audio.get_raw_data()
@@ -95,7 +100,7 @@ class RealTimeTranslator:
 
     def start_listening(self):
         """
-            Start listening to the audio input and adjust for ambient noise.
+        Start listening to the audio input and adjust for ambient noise.
         """
         with self.source:
             self.recorder.adjust_for_ambient_noise(self.source)
@@ -104,12 +109,12 @@ class RealTimeTranslator:
 
     def process_audio(self, audio_data):
         """
-            Process the audio data and transcribe it using the Whisper model.
+        Process the audio data and transcribe it using the Whisper model.
 
-            Parameters:
+        Parameters:
             audio_data (bytes): Raw audio data.
 
-            Returns:
+        Returns:
             str: The transcribed text.
         """
         audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
@@ -118,13 +123,17 @@ class RealTimeTranslator:
 
     def synthesize_and_play_audio(self, text):
         """
-            Synthesize and play the audio from the given text.
+        Synthesize and play the audio from the given text.
 
-            Parameters:
+        Parameters:
             text (str): The text to be converted to speech.
         """
         wav_buffer = BytesIO()
-        self.tts.tts_to_file(text=text, file_path=wav_buffer, language=languages_dict[self.output_language], speaker="male-en-2")
+        if self.output_language == "German":
+            self.tts.tts_to_file(text=text, file_path=wav_buffer)
+        else:
+            self.tts.tts_to_file(text=text, file_path=wav_buffer, language=languages_dict[self.output_language], speaker="male-en-2")
+
         wav_buffer.seek(0)
         audio = AudioSegment.from_file(wav_buffer, format="wav")
         play_obj = sa.play_buffer(audio.raw_data, num_channels=audio.channels, bytes_per_sample=audio.sample_width, sample_rate=audio.frame_rate)
@@ -132,7 +141,7 @@ class RealTimeTranslator:
 
     def run(self):
         """
-            Run the main loop to handle audio recording, processing, translation, and playback.
+        Run the main loop to handle audio recording, processing, translation, and playback.
         """
         self.start_listening()
 
