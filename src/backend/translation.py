@@ -107,3 +107,48 @@ def text_translation(text:str, output_language:str)-> str:
     response = chat_completion.choices[0].message.content
     
     return(response)
+
+
+def text_transcript(text: str) -> str:
+    """
+    Translates the given text to Spanish using Azure OpenAI.
+
+    Parameters:
+    text (str): The text to be translated.
+
+    Returns:
+    str: The translated text in Spanish.
+    """
+    client = AzureOpenAI(
+        api_version=os.getenv("OPENAI_API_VERSION"),
+        azure_endpoint=os.getenv("OPENAI_ENDPOINT"),
+        api_key=os.getenv("OPENAI_KEY")
+    )
+
+    message_text = [{
+        "role": "system",
+        "content": f"""
+        You are an expert translator providing real-time translations. Your objective is to translate as accurately as possible while preserving the original tone and formalities.
+        Precision is key to avoid misunderstandings.
+
+        Input:
+        Text to translate: "{text}"
+
+        Task:
+        Translate the provided text into Spanish with the utmost precision, maintaining the tone and formalities of the original text.
+        Return only the translated text, without any additional information.
+
+        Output:
+        The translated text in Spanish.
+        """
+    }]
+
+    chat_completion = client.chat.completions.create(
+        model="gpt4-turbo",
+        messages=message_text,
+        temperature=0.0
+    )
+    
+    response = chat_completion.choices[0].message.content
+    
+    return response
