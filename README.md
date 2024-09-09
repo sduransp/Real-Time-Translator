@@ -2,6 +2,8 @@
 
 Welcome to the Real-Time Multilingual Conversation Translator for MS Teams! This project aims to break language barriers in virtual meetings by providing real-time translations of conversations from Microsoft Teams into Spanish and enabling users to speak in Spanish while their speech is translated and sent back in the target language. With this app, you can effortlessly engage in conversations in any language on MS Teams.
 
+![speaker](https://cdn.mos.cms.futurecdn.net/C6bmmDwjYdb4D4whKn5yVc.jpg)
+
 ## Key Features
 
 * **Real-Time Translation:** Translates conversations from MS Teams into Spanish in real-time.
