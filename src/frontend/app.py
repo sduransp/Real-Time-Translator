@@ -1,4 +1,4 @@
-# C:\Users\DURANAS\Coding\real-time-translator\src\frontend\app.py
+
 import tkinter
 import tkinter.messagebox
 import customtkinter
